@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Film, Star } from 'lucide-react';
 import type { MovieItem } from '../types/movie';
 
@@ -84,10 +84,46 @@ export const MoviePoster: React.FC<MoviePosterProps> = ({ movie, className = '',
   const primaryGenre = movie.genres && movie.genres.length > 0 ? movie.genres[0] : 'Drama';
   const palette = GENRE_PALETTES[primaryGenre] || GENRE_PALETTES['Drama'];
 
-  const tmdbId = movie.id || movie.movie_id;
-  const posterUrl = movie.poster_path
-    ? (movie.poster_path.startsWith('http') ? movie.poster_path : `https://image.tmdb.org/t/p/w500${movie.poster_path}`)
-    : (tmdbId ? `https://image.tmdb.org/t/p/w500/placeholder_${tmdbId}.jpg` : null);
+  const getDirectPosterUrl = () => {
+    if (movie.poster_url) return movie.poster_url;
+    if (movie.poster_path) {
+      return movie.poster_path.startsWith('http')
+        ? movie.poster_path
+        : `https://image.tmdb.org/t/p/w500${movie.poster_path}`;
+    }
+    return null;
+  };
+
+  const [posterUrl, setPosterUrl] = useState<string | null>(getDirectPosterUrl);
+
+  useEffect(() => {
+    const direct = getDirectPosterUrl();
+    if (direct) {
+      setPosterUrl(direct);
+      setImgFailed(false);
+      return;
+    }
+
+    // Lookup corresponding movie_id from TMDB dataset
+    const idToLookup = movie.movie_id || movie.id || movie.title;
+    if (!idToLookup) return;
+
+    let isMounted = true;
+    fetch(`/api/poster/${encodeURIComponent(idToLookup)}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (isMounted && data && (data.poster_url || data.poster_path)) {
+          const resolved = data.poster_url || `https://image.tmdb.org/t/p/w500${data.poster_path}`;
+          setPosterUrl(resolved);
+          setImgFailed(false);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [movie.poster_path, movie.poster_url, movie.movie_id, movie.id, movie.title]);
 
   const initials = movie.title
     ? movie.title

@@ -3,6 +3,9 @@ import sys
 import json
 import pickle
 import ast
+import urllib.request
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -23,12 +26,93 @@ MOVIES_PKL = BASE_DIR / "movies.pkl"
 SIMILARITY_PKL = BASE_DIR / "similarity.pkl"
 MOVIES_CSV = BASE_DIR / "tmdb_5000_movies.csv"
 CREDITS_CSV = BASE_DIR / "tmdb_5000_credits.csv"
+POSTER_CACHE_FILE = BASE_DIR / "poster_cache.json"
+
+# TMDB Configuration
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "8265bd1679663a7ea12ac168da84d2e8")
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
+TMDB_BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
 
 # Global stores
 movies_df = None
 similarity_matrix = None
 metadata_dict = {}
 movie_titles_list = []
+poster_cache = {}
+
+def load_poster_cache():
+    global poster_cache
+    if POSTER_CACHE_FILE.exists():
+        try:
+            with open(POSTER_CACHE_FILE, "r", encoding="utf-8") as f:
+                poster_cache = json.load(f)
+            print(f"Loaded {len(poster_cache)} cached movie posters.")
+        except Exception as e:
+            print("Failed to load poster cache:", e)
+            poster_cache = {}
+
+def save_poster_cache():
+    try:
+        with open(POSTER_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(poster_cache, f)
+    except Exception:
+        pass
+
+def fetch_poster_from_tmdb(movie_id):
+    """
+    Fetch poster_path and backdrop_path from TMDB API using the movie_id
+    from the TMDB dataset. Results are cached in memory and on disk.
+    """
+    if not movie_id:
+        return None
+    try:
+        mid_int = int(movie_id)
+        mid_str = str(mid_int)
+    except (ValueError, TypeError):
+        return None
+
+    if mid_str in poster_cache and poster_cache[mid_str]:
+        return poster_cache[mid_str]
+
+    url = f"https://api.themoviedb.org/3/movie/{mid_str}?api_key={TMDB_API_KEY}&language=en-US"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Aetheria/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            poster_path = data.get("poster_path")
+            backdrop_path = data.get("backdrop_path")
+            result = {
+                "movie_id": mid_int,
+                "poster_path": poster_path,
+                "poster_url": f"{TMDB_IMAGE_BASE}{poster_path}" if poster_path else None,
+                "backdrop_path": backdrop_path,
+                "backdrop_url": f"{TMDB_BACKDROP_BASE}{backdrop_path}" if backdrop_path else None
+            }
+            poster_cache[mid_str] = result
+            return result
+    except Exception:
+        # Fallback cache entry to avoid tight retries on invalid IDs
+        return None
+
+def batch_fetch_posters(movie_ids):
+    """Prefetch posters for a list of movie IDs concurrently."""
+    needed = []
+    for mid in movie_ids:
+        if mid:
+            try:
+                m_str = str(int(mid))
+                if m_str not in poster_cache:
+                    needed.append(int(mid))
+            except (ValueError, TypeError):
+                continue
+
+    if needed:
+        with ThreadPoolExecutor(max_workers=min(10, len(needed))) as executor:
+            list(executor.map(fetch_poster_from_tmdb, needed))
+        save_poster_cache()
 
 # Stopwords to filter out from tags when highlighting matched features
 COMMON_STOPWORDS = {
@@ -106,6 +190,7 @@ def load_data():
 
             meta = {
                 "id": mid,
+                "movie_id": mid,
                 "title": title,
                 "overview": str(row.get('overview', '')).strip() if not pd.isna(row.get('overview')) else "",
                 "tagline": str(row.get('tagline', '')).strip() if not pd.isna(row.get('tagline')) else "",
@@ -127,7 +212,7 @@ def load_data():
                 metadata_dict[mid] = meta
             metadata_dict[title.lower()] = meta
 
-    # Cache titles list for search & autocomplete
+    # Cache titles list for search & autocomplete, ensuring movie_id from TMDB dataset
     movie_titles_list = []
     seen = set()
     for idx, row in movies_df.iterrows():
@@ -136,14 +221,22 @@ def load_data():
         if t.lower() not in seen:
             seen.add(t.lower())
             meta = metadata_dict.get(mid, metadata_dict.get(t.lower(), {}))
+            meta["movie_id"] = mid
+            meta["id"] = mid
+            metadata_dict[mid] = meta
+            metadata_dict[t.lower()] = meta
             movie_titles_list.append({
                 "title": t,
                 "movie_id": mid,
+                "id": mid,
                 "year": meta.get("year", ""),
                 "rating": meta.get("vote_average", 0.0),
                 "genres": meta.get("genres", []),
                 "popularity": meta.get("popularity", 0.0)
             })
+
+    # Load persistent poster cache
+    load_poster_cache()
 
     print(f"Backend Ready: {len(movie_titles_list)} indexed titles available.")
 
@@ -211,6 +304,15 @@ def extract_matched_tokens(target_tags_str, rec_tags_str, max_tokens=4):
     return filtered[:max_tokens]
 
 def enrich_movie_item(title, movie_id=None, similarity_score=None, target_tags=None, rec_tags=None):
+    # Resolve movie_id from TMDB dataset if not provided
+    if not movie_id:
+        if title.lower() in metadata_dict and metadata_dict[title.lower()].get("movie_id"):
+            movie_id = metadata_dict[title.lower()]["movie_id"]
+        elif movies_df is not None:
+            matches = movies_df[movies_df['title'].str.lower() == title.lower()]
+            if not matches.empty:
+                movie_id = int(matches.iloc[0]['movie_id'])
+
     meta = None
     if movie_id and movie_id in metadata_dict:
         meta = metadata_dict[movie_id]
@@ -220,6 +322,7 @@ def enrich_movie_item(title, movie_id=None, similarity_score=None, target_tags=N
     if not meta:
         meta = {
             "id": movie_id or 0,
+            "movie_id": movie_id or 0,
             "title": title,
             "overview": "An engaging cinematic story.",
             "tagline": "",
@@ -235,6 +338,25 @@ def enrich_movie_item(title, movie_id=None, similarity_score=None, target_tags=N
         }
 
     res = dict(meta)
+    resolved_id = movie_id or res.get("movie_id") or res.get("id") or 0
+    res["id"] = resolved_id
+    res["movie_id"] = resolved_id
+
+    # Attach TMDB poster and backdrop assets from TMDB movie_id
+    mid_str = str(resolved_id)
+    if mid_str in poster_cache and poster_cache[mid_str]:
+        pinfo = poster_cache[mid_str]
+        res["poster_path"] = pinfo.get("poster_path")
+        res["poster_url"] = pinfo.get("poster_url")
+        res["backdrop_path"] = pinfo.get("backdrop_path")
+        res["backdrop_url"] = pinfo.get("backdrop_url")
+    elif resolved_id:
+        pinfo = fetch_poster_from_tmdb(resolved_id)
+        if pinfo:
+            res["poster_path"] = pinfo.get("poster_path")
+            res["poster_url"] = pinfo.get("poster_url")
+            res["backdrop_path"] = pinfo.get("backdrop_path")
+            res["backdrop_url"] = pinfo.get("backdrop_url")
 
     # Compute realistic match percentage and synergy rating based on cosine similarity
     if similarity_score is not None:
@@ -369,6 +491,10 @@ def recommend_movies():
     # Sort by strategic score
     scored_candidates.sort(key=lambda x: x["score"], reverse=True)
 
+    # Batch prefetch posters for source and top recommended candidates using TMDB movie_ids
+    prefetch_mids = [c["mid"] for c in scored_candidates[:top_n]] + [target_mid]
+    batch_fetch_posters(prefetch_mids)
+
     recommendations = []
     for rank, cand in enumerate(scored_candidates[:top_n], start=1):
         enriched = enrich_movie_item(
@@ -398,6 +524,48 @@ def recommend_movies():
         }
     })
 
+@app.route("/api/poster/<path:identifier>", methods=["GET"])
+def get_movie_poster(identifier):
+    """
+    Given a movie_id from the TMDB dataset or a movie title,
+    resolve the corresponding TMDB movie_id and fetch its poster assets.
+    """
+    identifier = identifier.strip()
+    mid = None
+    try:
+        mid = int(identifier)
+    except ValueError:
+        pass
+
+    title_name = identifier
+    if not mid:
+        if identifier.lower() in metadata_dict and metadata_dict[identifier.lower()].get("movie_id"):
+            mid = metadata_dict[identifier.lower()]["movie_id"]
+            title_name = metadata_dict[identifier.lower()].get("title", identifier)
+        elif movies_df is not None:
+            matches = movies_df[movies_df['title'].str.lower() == identifier.lower()]
+            if not matches.empty:
+                mid = int(matches.iloc[0]['movie_id'])
+                title_name = matches.iloc[0]['title']
+
+    if not mid:
+        return jsonify({"error": f"Movie ID not found for '{identifier}' in TMDB dataset."}), 404
+
+    poster_info = fetch_poster_from_tmdb(mid)
+    if not poster_info:
+        return jsonify({
+            "movie_id": mid,
+            "title": title_name,
+            "poster_path": None,
+            "poster_url": None,
+            "backdrop_path": None,
+            "backdrop_url": None
+        })
+
+    poster_info["title"] = title_name
+    save_poster_cache()
+    return jsonify(poster_info)
+
 @app.route("/api/movie/<path:identifier>", methods=["GET"])
 def get_movie_detail(identifier):
     identifier = identifier.strip()
@@ -409,9 +577,12 @@ def get_movie_detail(identifier):
 
     enriched = None
     if mid and mid in metadata_dict:
-        enriched = metadata_dict[mid]
+        m = metadata_dict[mid]
+        enriched = enrich_movie_item(m.get("title", ""), movie_id=mid)
     elif identifier.lower() in metadata_dict:
-        enriched = metadata_dict[identifier.lower()]
+        m = metadata_dict[identifier.lower()]
+        resolved_mid = m.get("movie_id") or m.get("id")
+        enriched = enrich_movie_item(m.get("title", identifier), movie_id=resolved_mid)
     else:
         matches = movies_df[movies_df['title'].str.lower() == identifier.lower()]
         if not matches.empty:
@@ -474,14 +645,25 @@ def get_explore_categories():
         reverse=True
     )[:10]
 
+    # Batch prefetch posters for top explore movies
+    top_explore_mids = [
+        m["movie_id"] for m in (trending + acclaimed + scifi + action + thrillers + animation)
+        if m.get("movie_id")
+    ]
+    batch_fetch_posters(top_explore_mids)
+
+    # Enrich each movie with poster assets
+    def enrich_list(items):
+        return [enrich_movie_item(it.get("title", ""), movie_id=it.get("movie_id")) for it in items]
+
     return jsonify({
         "categories": [
-            {"id": "trending", "title": "Trending Worldwide", "tagline": "Most searched & watched right now", "movies": trending},
-            {"id": "acclaimed", "title": "Critically Acclaimed Masterpieces", "tagline": "Highest audience & critics approval", "movies": acclaimed},
-            {"id": "scifi", "title": "Futuristic & Sci-Fi Visions", "tagline": "Space, cyberpunk, and alternate realities", "movies": scifi},
-            {"id": "action", "title": "High-Octane Action", "tagline": "Adrenaline-fueled blockbusters", "movies": action},
-            {"id": "thrillers", "title": "Psychological Thrillers & Mystery", "tagline": "Twists, suspense, and intrigue", "movies": thrillers},
-            {"id": "animation", "title": "Animation & Magical Fantasy", "tagline": "Stunning visuals and heartfelt journeys", "movies": animation},
+            {"id": "trending", "title": "Trending Worldwide", "tagline": "Most searched & watched right now", "movies": enrich_list(trending)},
+            {"id": "acclaimed", "title": "Critically Acclaimed Masterpieces", "tagline": "Highest audience & critics approval", "movies": enrich_list(acclaimed)},
+            {"id": "scifi", "title": "Futuristic & Sci-Fi Visions", "tagline": "Space, cyberpunk, and alternate realities", "movies": enrich_list(scifi)},
+            {"id": "action", "title": "High-Octane Action", "tagline": "Adrenaline-fueled blockbusters", "movies": enrich_list(action)},
+            {"id": "thrillers", "title": "Psychological Thrillers & Mystery", "tagline": "Twists, suspense, and intrigue", "movies": enrich_list(thrillers)},
+            {"id": "animation", "title": "Animation & Magical Fantasy", "tagline": "Stunning visuals and heartfelt journeys", "movies": enrich_list(animation)},
         ]
     })
 

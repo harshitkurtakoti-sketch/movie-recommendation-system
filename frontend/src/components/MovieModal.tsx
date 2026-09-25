@@ -96,20 +96,38 @@ export const MovieModal: React.FC<MovieModalProps> = ({
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           <div
             style={{
+              position: 'relative',
               display: 'flex',
               flexDirection: 'row',
               gap: '32px',
               padding: '36px 36px 28px',
               background: 'linear-gradient(180deg, rgba(255, 42, 84, 0.08) 0%, transparent 100%)',
               borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-              flexWrap: 'wrap'
+              flexWrap: 'wrap',
+              overflow: 'hidden'
             }}
           >
-            <div style={{ width: '180px', flexShrink: 0, borderRadius: '16px', overflow: 'hidden' }}>
+            {(movie.backdrop_url || movie.backdrop_path) && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  backgroundImage: `url(${movie.backdrop_url || `https://image.tmdb.org/t/p/w1280${movie.backdrop_path}`})`,
+                  backgroundSize: 'cover',
+                  backgroundPosition: 'center 20%',
+                  opacity: 0.22,
+                  filter: 'blur(8px) saturate(1.2)',
+                  pointerEvents: 'none',
+                  zIndex: 0
+                }}
+              />
+            )}
+
+            <div style={{ position: 'relative', zIndex: 1, width: '180px', flexShrink: 0, borderRadius: '16px', overflow: 'hidden' }}>
               <MoviePoster movie={movie} size="lg" />
             </div>
 
-            <div style={{ flex: '1 1 340px', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+            <div style={{ position: 'relative', zIndex: 1, flex: '1 1 340px', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
               {movie.match_percentage && (
                 <div
                   style={{

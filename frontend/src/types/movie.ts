@@ -23,7 +23,9 @@ export interface MovieItem {
   matched_features?: string[];
   rank?: number;
   poster_path?: string;
+  poster_url?: string;
   backdrop_path?: string;
+  backdrop_url?: string;
 }
 
 export interface RecommendationResponse {
