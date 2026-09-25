@@ -1,5 +1,7 @@
 # AETHERIA — AI Movie Intelligence Engine
 
+http://127.0.0.1:5173
+
 > **Discover movies by understanding what you like — not just what you search for.**
 
 AETHERIA is a production-style **AI-powered movie recommendation platform** that uses **content-based Machine Learning, vectorization, and cosine similarity** to understand movie characteristics and generate personalized recommendations.
