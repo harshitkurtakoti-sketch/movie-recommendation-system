@@ -1,6 +1,7 @@
 # AETHERIA — AI Movie Intelligence Engine
 
 A production-quality cinematic frontend and API platform powered by content-based Machine Learning recommendation vectors.
+http://127.0.0.1:5173
 
 ---
 
